@@ -49,6 +49,7 @@ EXPECTED_MODULES = {
     "glm5_next",
     "glm5_next_mtp",
     "kimi_k3",
+    "kimi_k3_dsa_indexer",
     "llama4",
     "minimax_m3",
     "minimax_m3_msa",
