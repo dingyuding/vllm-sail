@@ -57,6 +57,9 @@ if TYPE_CHECKING:
     VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
     VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = False
     VLLM_STEP5_INDEXER_FP8_AS_FP16: bool = False
+    VLLM_SAIL_MINIMAX_M3_MSA: bool = True
+    VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON: bool = False
+    VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON: bool = False
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_DICT: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
@@ -283,6 +286,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The FP16 summary cache takes twice the memory; keeps the Step5 fork's name.
     # Read lazily; set it before the server starts and keep it fixed at runtime.
     "VLLM_STEP5_INDEXER_FP8_AS_FP16": _bool("VLLM_STEP5_INDEXER_FP8_AS_FP16", False),
+    # -- MiniMax M3 SAIL MSA sparse attention -------------------------------
+    # Enabled by default: the SAIL path is selected whenever the platform, the
+    # model shape and the installed `msa_for_sail` allow it; the dtypes follow
+    # the platform and the KV cache dtype (see models/minimax_m3_msa/gating.py).
+    # 0 keeps the PPU Triton implementation for both halves.
+    "VLLM_SAIL_MINIMAX_M3_MSA": _bool("VLLM_SAIL_MINIMAX_M3_MSA", True),
+    # Bisection switches: keep one half on the PPU Triton implementation while
+    # the other half runs the SAIL kernels.
+    "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON": _bool(
+        "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON", False
+    ),
+    "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON": _bool(
+        "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON", False
+    ),
     # -- Attention / linear attention --------------------------------------
     # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
     "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),
