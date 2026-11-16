@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_ENABLE_MOE_MARLIN: bool = False
-    VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xmxfp4"
+    VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xfp4"
     VLLM_SAIL_DISABLE_MEGA_MHC: bool = False
     VLLM_SAIL_USE_TRITON_INT8_QUANT: bool = True
     VLLM_SAIL_FP8_LOAD_POLICY: str | None = None
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_SAIL_PPU_KV_MXFP8: bool = False
     VLLM_SAIL_PPU_KV_NVFP4: bool = False
+    VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -99,6 +100,7 @@ if TYPE_CHECKING:
     VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_PPU_PPU_KV_MXFP8: bool = False
     VLLM_PPU_PPU_KV_NVFP4: bool = False
+    VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
 
 _TRUTHY = ("true", "1", "yes", "on")
 
@@ -106,7 +108,7 @@ _TRUTHY = ("true", "1", "yes", "on")
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
-MEGA_MOE_MMA_TYPES = ("mxf4xmxf4", "fp8xmxfp4", "bf16xmxfp4")
+MEGA_MOE_MMA_TYPES = ("fp4xfp4", "fp8xfp4", "bf16xfp4")
 STEP5_PREFILL_BACKENDS = ("flashinfer", "native")
 
 
@@ -232,7 +234,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # by the CUDA-free manifest; this flag cannot supply those kernels.
     "VLLM_SAIL_ENABLE_MOE_MARLIN": _bool("VLLM_SAIL_ENABLE_MOE_MARLIN", False),
     "VLLM_SAIL_MEGA_MOE_MMA_TYPE": _choice(
-        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xmxfp4", MEGA_MOE_MMA_TYPES
+        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xfp4", MEGA_MOE_MMA_TYPES
     ),
     # -- DSV4.1 mHC ----------------------------------------------------------
     # Disable the PPU Mega mHC kernel so the upstream TileLang mHC path takes
@@ -329,6 +331,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is unavailable on 8.0) and sliding_window % 8 == 0; the fused gate closes
     # with a named reason otherwise. Lossy: accuracy must be re-measured.
     "VLLM_SAIL_PPU_KV_NVFP4": _bool("VLLM_SAIL_PPU_KV_NVFP4", False),
+    # Output FP8 scale format of the fused V4.1 norm-rope attention kernel
+    # (FlashMLA-for-sail PR#59, "channel-wise output and runtime format
+    # selection"). False (default) -> the PR#54 contract: num_per_channels=32
+    # with TMA-aligned, rounded, packed UE8M0 scales, i.e. an int32
+    # [tokens, n_wv_group, D/128] buffer. True -> one exact FP32 dequantization
+    # scale per token and WV group: num_per_channels=4096 with all three format
+    # flags cleared, i.e. a contiguous float32 [tokens, n_wv_group, 1] buffer.
+    # Both formats live in the same PR#59 wheel; the kernel hard-requires
+    # capability 8.9 (ZW-M890P) for the per-token format and rejects any mixed
+    # flag combination, so the fused gate closes with a named reason on 8.0.
+    # Opt-in and lossless-relative-to-block32: the FP32 scale avoids the UE8M0
+    # power-of-two rounding, so accuracy must be re-measured against the
+    # default arm rather than assumed. Requires a PR#59 (or newer) flash_mla
+    # wheel; older wheels reject num_per_channels=4096.
+    "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE": _bool(
+        "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", False
+    ),
     # -- Distributed MoE ---------------------------------------------------
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
