@@ -31,6 +31,7 @@ from tests.support.source import assert_accepts_upstream_keywords
 MODELS_PATCH_DIR = (
     pathlib.Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "models"
 )
+REPO_ROOT = pathlib.Path(__file__).parents[2]
 
 EXPECTED_MODULES = {
     "deepseek_mtp",
@@ -39,6 +40,7 @@ EXPECTED_MODULES = {
     "deepseek_v4_cache",
     "deepseek_v4_metadata",
     "deepseek_v4_compressor",
+    "deepseek_v4_graph_warmup",
     "deepseek_v41",
     "deepseek_v41_engram",
     "deepseek_v41_indexer",
@@ -49,6 +51,7 @@ EXPECTED_MODULES = {
     "kimi_k3",
     "llama4",
     "minimax_m3",
+    "minimax_m3_msa",
     "moe_marlin_gate",
     "qwen3_fused_quant",
     "qwen3_moe",
@@ -136,6 +139,66 @@ def test_every_patch_has_well_formed_metadata() -> None:
             )
 
 
+def _plugin_source(dotted: str) -> pathlib.Path | None:
+    """The file that defines plugin module ``dotted``, if it exists in-tree."""
+    path = REPO_ROOT.joinpath(*dotted.split("."))
+    for candidate in (path.with_suffix(".py"), path / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _top_level_names(path: pathlib.Path) -> set[str]:
+    names: set[str] = set()
+    for node in ast.parse(path.read_text(), filename=str(path)).body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            names.update(
+                (alias.asname or alias.name).split(".")[0] for alias in node.names
+            )
+    return names
+
+
+def test_plugin_imports_and_targets_exist_in_tree() -> None:
+    """Every ``vllm_sail`` module a patch module imports or targets is in-tree.
+
+    The modules import their targets eagerly and ``install()`` has no fallback,
+    so a dangling plugin path breaks plugin load for every model on PPU. Only
+    a vLLM run would notice; this AST check catches it on a bare CPU.
+    """
+    for path in _patch_module_files():
+        tree = ast.parse(path.read_text(), filename=str(path))
+        constants = _module_constants(tree)
+        modules = {
+            _string_value(call.args[0], constants)
+            for call in _patch_calls(tree)
+            if call.args
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                modules.add(node.module)
+                source = _plugin_source(node.module)
+                if source is None or source.name == "__init__.py":
+                    continue
+                # A plain module has no submodules: every name must be defined.
+                missing = {alias.name for alias in node.names} - _top_level_names(
+                    source
+                )
+                assert not missing, (
+                    f"{path.name}: {node.module} defines no {sorted(missing)}"
+                )
+        for module in sorted(m for m in modules if m.startswith("vllm_sail.")):
+            assert _plugin_source(module) is not None, (
+                f"{path.name}: {module} does not exist in the source tree"
+            )
+
+
 def test_subpackage_wiring_is_present() -> None:
     """The parent enhancement package imports models/.
 
@@ -152,6 +215,7 @@ def test_subpackage_wiring_is_present() -> None:
     )
 
 
+@pytest.mark.requires_runtime
 def test_full_package_chain_on_clean_upstream() -> None:
     """The full enhancement chain installs on a clean upstream vLLM.
 
@@ -264,6 +328,7 @@ _EXPECTED_TARGETS = {
 }
 
 
+@pytest.mark.requires_runtime
 def test_all_model_patches_land(installed_model_patches) -> None:
     from vllm_sail.patch.utils import PATCH_MARKER
 
@@ -288,6 +353,7 @@ def test_all_model_patches_land(installed_model_patches) -> None:
         assert marker_source is not None or record.was_missing, record.target
 
 
+@pytest.mark.requires_runtime
 def test_kimi_k3_quantized_up_proj_forces_tier_one(
     installed_model_patches,
 ) -> None:
@@ -310,6 +376,7 @@ def test_kimi_k3_quantized_up_proj_forces_tier_one(
     )
 
 
+@pytest.mark.requires_runtime
 def test_deepseek_v4_selector_uses_ppu_flashmla(installed_model_patches) -> None:
     from types import SimpleNamespace
     from unittest import mock
@@ -363,6 +430,7 @@ def test_deepseek_v4_selector_uses_ppu_flashmla(installed_model_patches) -> None
         )
 
 
+@pytest.mark.requires_runtime
 def test_ppu_flashmla_inherits_upstream_attention_flow(
     installed_model_patches,
 ) -> None:
@@ -389,6 +457,7 @@ def test_ppu_flashmla_inherits_upstream_attention_flow(
     )
 
 
+@pytest.mark.requires_runtime
 def test_deepseek_v4_mapper_remains_unpatched(installed_model_patches) -> None:
     """Installing the PPU model selector must not alter CUDA weight mapping."""
     from vllm.models.deepseek_v4.nvidia import model as nvidia_model
@@ -398,6 +467,7 @@ def test_deepseek_v4_mapper_remains_unpatched(installed_model_patches) -> None:
     assert not hasattr(nvidia_model._make_deepseek_v4_weights_mapper, PATCH_MARKER)
 
 
+@pytest.mark.requires_runtime
 def test_marlin_gate_defaults_off_on_ppu(installed_model_patches) -> None:
     """Decision D2(c): MoE Marlin stays disabled on PPU unless opted in.
 
@@ -415,6 +485,7 @@ def test_marlin_gate_defaults_off_on_ppu(installed_model_patches) -> None:
         assert marlin_utils.check_moe_marlin_supports_config(object()) is False
 
 
+@pytest.mark.requires_runtime
 def test_reapplication_raises(installed_model_patches) -> None:
     """The double-patch guard must still fire for these targets."""
     from vllm_sail.patch.utils import patch

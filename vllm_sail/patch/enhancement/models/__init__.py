@@ -33,6 +33,8 @@ Modules, and why each is import-on-install like the rest of the framework:
   tail's fused tiers.
 * ``llama4`` — torch.compile on the custom router (+1).
 * ``minimax_m3`` — retain ordinary MoE finalize on PPU before NVIDIA imports.
+* ``minimax_m3_msa`` — route MiniMax M3 indexer + sparse attend to the SAIL
+  (``msa_for_sail``) kernels on PPU, with 890P fp8 / 810E bf16 defaults.
 * ``qwen3_moe`` — per-layer mix_layer quant overrides (+36).
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
 * ``qwen4_exp_qsa_fp4`` — QSA indexer compressed key cache as MXFP4, scored by
@@ -49,6 +51,7 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4,  # noqa: F401
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
+    deepseek_v4_graph_warmup,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
     deepseek_v41,  # noqa: F401
     deepseek_v41_engram,  # noqa: F401
@@ -59,6 +62,7 @@ from vllm_sail.patch.enhancement.models import (
     kimi_k3,  # noqa: F401
     llama4,  # noqa: F401
     minimax_m3,  # noqa: F401
+    minimax_m3_msa,  # noqa: F401
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401

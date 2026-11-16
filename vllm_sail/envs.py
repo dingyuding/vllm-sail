@@ -37,24 +37,30 @@ if TYPE_CHECKING:
     VLLM_SAIL_USE_PLA: bool = True
     VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED: bool = False
     VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT: bool = False
+    VLLM_SAIL_USE_DEEPSELECT: bool = True
     VLLM_SAIL_MOE_BACKEND: str | None = None
     VLLM_SAIL_DENSE_BACKEND: str | None = None
     VLLM_SAIL_FUSED_GDN_DECODE: bool = True
     VLLM_SAIL_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_ENABLE_MOE_MARLIN: bool = False
-    VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xmxfp4"
+    VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xfp4"
     VLLM_SAIL_DISABLE_MEGA_MHC: bool = False
     VLLM_SAIL_USE_TRITON_INT8_QUANT: bool = True
     VLLM_SAIL_FP8_LOAD_POLICY: str | None = None
     VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
     VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
+    VLLM_SAIL_MINIMAX_M3_MSA: bool = True
+    VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON: bool = False
+    VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON: bool = False
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_SAIL_PPU_KV_MXFP8: bool = False
+    VLLM_SAIL_PPU_KV_NVFP4: bool = False
+    VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -65,6 +71,7 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_PLA: bool = True
     VLLM_PPU_DEEPGEMM_MOE_TP_FUSED: bool = False
     VLLM_PPU_DEEPGEMM_MOE_FUSED_ACT_QUANT: bool = False
+    VLLM_PPU_USE_DEEPSELECT: bool = True
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
     VLLM_PPU_FUSED_GDN_DECODE: bool = True
@@ -79,6 +86,8 @@ if TYPE_CHECKING:
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_PPU_PPU_KV_MXFP8: bool = False
+    VLLM_PPU_PPU_KV_NVFP4: bool = False
+    VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
 
 _TRUTHY = ("true", "1", "yes", "on")
 
@@ -86,7 +95,7 @@ _TRUTHY = ("true", "1", "yes", "on")
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
-MEGA_MOE_MMA_TYPES = ("mxf4xmxf4", "fp8xmxfp4", "bf16xmxfp4")
+MEGA_MOE_MMA_TYPES = ("fp4xfp4", "fp8xfp4", "bf16xfp4")
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -166,6 +175,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_DENSE_BF16_DEEPGEMM": _bool("VLLM_SAIL_DENSE_BF16_DEEPGEMM", False),
     "VLLM_SAIL_USE_PLA": _bool("VLLM_SAIL_USE_PLA", True),
     "VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED": _bool("VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED", False),
+    "VLLM_SAIL_USE_DEEPSELECT": _bool("VLLM_SAIL_USE_DEEPSELECT", True),
     # Fuse the second GEMM's input quantization into DeepGEMM's activation
     # kernel (`silu_and_mul` / `situ_and_mul`) instead of running the activation
     # and a separate per-token/per-block quantize pass. The BF16 (w4a16 or
@@ -193,7 +203,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # by the CUDA-free manifest; this flag cannot supply those kernels.
     "VLLM_SAIL_ENABLE_MOE_MARLIN": _bool("VLLM_SAIL_ENABLE_MOE_MARLIN", False),
     "VLLM_SAIL_MEGA_MOE_MMA_TYPE": _choice(
-        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xmxfp4", MEGA_MOE_MMA_TYPES
+        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xfp4", MEGA_MOE_MMA_TYPES
     ),
     # -- DSV4.1 mHC ----------------------------------------------------------
     # Disable the PPU Mega mHC kernel so the upstream TileLang mHC path takes
@@ -222,6 +232,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS": _positive_int(
         "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
     ),
+    # -- MiniMax M3 SAIL MSA sparse attention -------------------------------
+    # Enabled by default: the SAIL path is selected whenever the platform, the
+    # model shape and the installed `msa_for_sail` allow it; the dtypes follow
+    # the platform and the KV cache dtype (see models/minimax_m3_msa/gating.py).
+    # 0 keeps the PPU Triton implementation for both halves.
+    "VLLM_SAIL_MINIMAX_M3_MSA": _bool("VLLM_SAIL_MINIMAX_M3_MSA", True),
+    # Bisection switches: keep one half on the PPU Triton implementation while
+    # the other half runs the SAIL kernels.
+    "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON": _bool(
+        "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON", False
+    ),
+    "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON": _bool(
+        "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON", False
+    ),
     # -- Attention / linear attention --------------------------------------
     # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
     "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),
@@ -242,6 +266,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Read once per process by the dsv41_kv_record patch, which also prints
     # the forensic line "[VLLM_SAIL] kv_mxfp8=<bool> kv_bytes_per_token=<n>".
     "VLLM_SAIL_PPU_KV_MXFP8": _bool("VLLM_SAIL_PPU_KV_MXFP8", False),
+    # Compressed-KV record for the fused V4.1 path: True -> 288B NVFP4 record
+    # (256B e2m1 + 32 per-16 e4m3 scales) for the *compressed* cache only, while
+    # the sliding-window cache keeps the 528B MXFP8 record the kernel requires.
+    # Default OFF (opt-in): both caches stay 528B MXFP8, byte-identical to the
+    # behaviour without this variable. Requires the master switch and
+    # VLLM_SAIL_PPU_KV_MXFP8=1, capability 8.9 (ZW-M890P; the e2m1 PTX conversion
+    # is unavailable on 8.0) and sliding_window % 8 == 0; the fused gate closes
+    # with a named reason otherwise. Lossy: accuracy must be re-measured.
+    "VLLM_SAIL_PPU_KV_NVFP4": _bool("VLLM_SAIL_PPU_KV_NVFP4", False),
+    # Output FP8 scale format of the fused V4.1 norm-rope attention kernel
+    # (FlashMLA-for-sail PR#59, "channel-wise output and runtime format
+    # selection"). False (default) -> the PR#54 contract: num_per_channels=32
+    # with TMA-aligned, rounded, packed UE8M0 scales, i.e. an int32
+    # [tokens, n_wv_group, D/128] buffer. True -> one exact FP32 dequantization
+    # scale per token and WV group: num_per_channels=4096 with all three format
+    # flags cleared, i.e. a contiguous float32 [tokens, n_wv_group, 1] buffer.
+    # Both formats live in the same PR#59 wheel; the kernel hard-requires
+    # capability 8.9 (ZW-M890P) for the per-token format and rejects any mixed
+    # flag combination, so the fused gate closes with a named reason on 8.0.
+    # Opt-in and lossless-relative-to-block32: the FP32 scale avoids the UE8M0
+    # power-of-two rounding, so accuracy must be re-measured against the
+    # default arm rather than assumed. Requires a PR#59 (or newer) flash_mla
+    # wheel; older wheels reject num_per_channels=4096.
+    "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE": _bool(
+        "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", False
+    ),
     # -- Distributed MoE ---------------------------------------------------
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
