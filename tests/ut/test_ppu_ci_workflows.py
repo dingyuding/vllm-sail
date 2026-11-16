@@ -158,11 +158,22 @@ def test_executor_uses_only_dispatch_with_a_stable_request_identity():
         "cancel-in-progress": False,
         "queue": "max",
     }
-    assert set(config["jobs"]) == {"validate", "ppu", "report"}
+    assert set(config["jobs"]) == {"validate", "cpu", "ppu", "report"}
 
 
 def test_executor_separates_read_only_pr_execution_and_always_reporting():
     jobs = workflow("ppu-pr-ci.yaml")["jobs"]
+    cpu = jobs["cpu"]
+    assert cpu["needs"] == "validate"
+    assert cpu["uses"] == "./.github/workflows/ut.yaml"
+    assert cpu["permissions"] == {"contents": "read"}
+    assert cpu["with"] == {
+        "pr_head_sha": "${{ inputs.head_sha }}",
+        "pr_number": "${{ inputs.pr_number }}",
+        "pr_head_ref": "${{ needs.validate.outputs.pr_head_ref }}",
+    }
+    assert "if" not in cpu
+    assert "secrets" not in cpu
     ppu = jobs["ppu"]
     assert ppu["needs"] == "validate"
     assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
@@ -188,6 +199,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert validate["outputs"] == {
         key: "${{ steps." + step["id"] + ".outputs." + key + " }}"
         for key in (
+            "pr_head_ref",
             "skip_ppu",
             "existing_build_run_id",
             "native_reuse_run_id",
@@ -196,7 +208,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     }
     report = jobs["report"]
     assert report["if"] == "always()"
-    assert report["needs"] == ["validate", "ppu"]
+    assert report["needs"] == ["validate", "cpu", "ppu"]
     assert all("always()" in step["if"] for step in report["steps"])
     step = next(step for step in report["steps"] if "run" in step)
     assert step["env"]["NEEDS"] == "${{ toJSON(needs) }}"
@@ -375,7 +387,9 @@ def test_pr_pipeline_structure():
     runtime = jobs["runtime-image"]
     assert runtime["runs-on"] == "8-ppu-m890p"
     assert "!inputs.skip_ppu" in runtime["if"]
-    assert "outputs" not in runtime
+    assert runtime["outputs"] == {
+        "upstream_reuse": "${{ steps.reuse.outputs.supported }}"
+    }
     resolve = next(
         step
         for step in runtime["steps"]
@@ -713,6 +727,8 @@ def test_workflow_filenames_distinguish_reusable_calls_from_entrypoints():
         triggers = workflow(path.name)[True]
         if path.name == "ppu-build-and-test.yaml":
             assert set(triggers) == {"workflow_call", "pull_request"}
+        elif path.name == "ut.yaml":
+            assert set(triggers) == {"workflow_call", "push", "workflow_dispatch"}
         elif path.name.startswith("_"):
             assert set(triggers) == {"workflow_call"}, path.name
         else:
@@ -1014,13 +1030,50 @@ def test_retry_reuses_build_artifacts_but_keeps_pin_diagnostics_per_attempt():
     )
 
 
-def test_cpu_checks_still_run_automatically_with_read_only_checkout():
+def test_bare_cpu_matrix_is_on_demand_and_uses_the_exact_pr_head():
     config = workflow("ut.yaml")
-    assert set(config[True]) == {"pull_request", "push", "workflow_dispatch"}
+    assert config["name"] == "CPU unit tests"
+    assert set(config[True]) == {"workflow_call", "push", "workflow_dispatch"}
+    assert config[True]["push"]["branches"] == ["main", "master"]
+    assert set(config[True]["workflow_call"]["inputs"]) == {
+        "pr_head_sha",
+        "pr_number",
+        "pr_head_ref",
+    }
     assert config["permissions"] == {"contents": "read"}
-    for job in config["jobs"].values():
-        for checkout in checkouts(job):
-            assert checkout["with"]["persist-credentials"] is False
+    assert config["concurrency"] == {
+        "group": "ut-${{ inputs.pr_head_sha && github.run_id || github.ref }}",
+        "cancel-in-progress": True,
+    }
+    assert set(config["jobs"]) == {"cpu-unit-tests"}
+    cpu = config["jobs"]["cpu-unit-tests"]
+    assert cpu["runs-on"] == "ubuntu-latest"
+    assert cpu["strategy"]["matrix"]["python-version"] == [
+        "3.10",
+        "3.11",
+        "3.12",
+        "3.13",
+    ]
+    assert "secrets" not in cpu
+    expected_ref = "${{ inputs.pr_head_sha || github.sha }}"
+    assert checkouts(cpu)[0]["with"] == {
+        "ref": expected_ref,
+        "persist-credentials": False,
+    }
+    for step in cpu["steps"]:
+        assert "cache" not in step.get("with", {})
+        if "pip install" in step.get("run", ""):
+            assert step["run"] == (
+                "python -m pip install --no-cache-dir -r requirements/dev.txt"
+            )
+    coverage = next(
+        step for step in cpu["steps"] if step.get("uses") == "codecov/codecov-action@v5"
+    )
+    assert coverage["with"]["override_commit"] == expected_ref
+    assert coverage["with"]["override_pr"] == "${{ inputs.pr_number }}"
+    assert coverage["with"]["override_branch"] == (
+        "${{ inputs.pr_head_ref || github.ref_name }}"
+    )
 
 
 def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attempt():
@@ -1171,6 +1224,7 @@ def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, sourc
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
         "needs.runtime-image.result": "success",
+        "needs.runtime-image.outputs.upstream_reuse": "true",
         "needs.build.result": build,
     }
     reuse = bool(run_id) and bool(source)
@@ -1226,6 +1280,94 @@ def test_gate_executes_fail_closed_truth_table(
         or (states[0] == "skipped" and bool(run_id) and bool(source))
     ) and states[1:] == ("success", "success", "success")
     assert passed is expected
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_runtime_preflight_detects_the_upstream_reuse_entry_script(
+    build_jobs, tmp_path, present
+):
+    step = next(
+        step
+        for step in build_jobs["runtime-image"]["steps"]
+        if step.get("id") == "reuse"
+    )
+    assert step["env"] == {"SOURCE_DIR": "${{ steps.workspace.outputs.source }}"}
+    if present:
+        (tmp_path / "scripts/ci").mkdir(parents=True)
+        (tmp_path / "scripts/ci/ppu_upstream_reuse.sh").write_text("")
+    output = tmp_path / "github-output"
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        env={**os.environ, "SOURCE_DIR": str(tmp_path), "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text() == f"supported={str(present).lower()}\n"
+
+
+@pytest.mark.parametrize("supported", ["true", "false", None])
+def test_upstream_reuse_lane_requires_the_entry_script(build_jobs, supported):
+    context = {
+        "github.event_name": "workflow_dispatch",
+        "inputs.skip_ppu": False,
+        "inputs.skip_device_tests": False,
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "success",
+        "needs.runtime-image.outputs.upstream_reuse": supported,
+        "needs.build.result": "success",
+    }
+    assert bool(expression(build_jobs["upstream-reuse"]["if"], context)) == (
+        supported == "true"
+    )
+    # Only the reuse lane depends on the entry script.
+    for job_id in ("pin-unit-tests", "model-tests"):
+        assert expression(build_jobs[job_id]["if"], context)
+
+
+@pytest.mark.parametrize(
+    "outputs,lanes,passed",
+    [
+        ({"upstream_reuse": "false"}, ("success", "success", "skipped"), True),
+        ({"upstream_reuse": "false"}, ("success", "success", "failure"), False),
+        ({"upstream_reuse": "false"}, ("skipped", "success", "skipped"), False),
+        ({"upstream_reuse": "false"}, ("success", "skipped", "skipped"), False),
+        ({"upstream_reuse": "true"}, ("success", "success", "skipped"), False),
+        ({"upstream_reuse": ""}, ("success", "success", "skipped"), False),
+        ({}, ("success", "success", "skipped"), False),
+    ],
+)
+def test_gate_accepts_skipped_reuse_only_without_the_entry_script(
+    build_jobs, outputs, lanes, passed
+):
+    script = build_jobs["gate"]["steps"][0]["run"].replace(
+        "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
+    )
+    results = {
+        "runtime-image": {"result": "success", "outputs": outputs},
+        "build": {"result": "success"},
+    }
+    results.update(
+        (job, {"result": state})
+        for job, state in zip(
+            ("pin-unit-tests", "model-tests", "upstream-reuse"), lanes, strict=True
+        )
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", script],
+        env={
+            **os.environ,
+            "JOB_RESULTS": json.dumps(results),
+            "SKIP_PPU": "false",
+            "SKIP_DEVICE_TESTS": "false",
+            "EXISTING_BUILD_RUN_ID": "",
+            "WHEEL_SOURCE_SHA": "",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) is passed, result.stderr
 
 
 def test_runtime_workflows_use_the_checked_in_docker_wrapper():
@@ -1289,6 +1431,37 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
     assert (
         "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-kernel-perf.yaml").read_text()
     )
+
+
+@pytest.mark.parametrize(
+    "name,job_id,mode",
+    [
+        ("_ppu-pin-ut.yaml", "pin-unit-tests", "pin-ut"),
+        ("_ppu-upstream-reuse.yaml", "upstream-reuse", "upstream-reuse"),
+    ],
+)
+def test_ut_and_reuse_leaves_prepare_verified_upstream_source(name, job_id, mode):
+    job = workflow(name)["jobs"][job_id]
+    source = checkouts(job)[1]
+    assert source["with"] == {
+        "repository": "vllm-project/vllm",
+        "ref": "${{ steps.upstream.outputs.ref }}",
+        "path": "${{ steps.runtime.outputs.upstream_rel }}",
+        "persist-credentials": False,
+    }
+    verify = job["steps"][job["steps"].index(source) + 1]
+    assert verify["env"]["EXPECTED_SHA"] == source["with"]["ref"]
+    assert verify["env"]["UPSTREAM_DIR"] == "${{ steps.runtime.outputs.upstream }}"
+    assert 'rev-parse HEAD)" = "$EXPECTED_SHA"' in verify["run"]
+    runtime = next(
+        step
+        for step in job["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
+    )
+    assert (
+        runtime["env"]["PPU_CI_UPSTREAM_DIR"] == "${{ steps.runtime.outputs.upstream }}"
+    )
+    assert runtime["run"].endswith(f'" {mode}')
 
 
 def test_upstream_reuse_only_runs_in_the_authorized_pipeline():
@@ -1358,10 +1531,11 @@ def test_upstream_reuse_leaf_uses_exact_pin_and_dual_source_identity():
     assert upload["uses"] == "actions/upload-artifact@v4"
     assert "github.run_attempt" in upload["with"]["name"]
     jobs = workflow("ppu-build-and-test.yaml")["jobs"]
-    assert (
-        jobs["upstream-reuse"]["if"]
-        == jobs["pin-unit-tests"]["if"]
-        == jobs["model-tests"]["if"]
+    runtime_ok = "needs.runtime-image.result == 'success' &&"
+    assert jobs["pin-unit-tests"]["if"] == jobs["model-tests"]["if"]
+    assert jobs["upstream-reuse"]["if"] == jobs["pin-unit-tests"]["if"].replace(
+        runtime_ok,
+        runtime_ok + " needs.runtime-image.outputs.upstream_reuse == 'true' &&",
     )
 
 

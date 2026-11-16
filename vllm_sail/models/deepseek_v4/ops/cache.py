@@ -225,6 +225,17 @@ def _dequantize_and_gather_k_cache_triton(
 ) -> None:
     """SM80 Triton dispatch — uses _decode_e4m3fn instead of the
     fp8e4nv bitcast that Triton refuses to compile on SM80."""
+    # This kernel only understands the V4 584B record, whose page puts the whole
+    # data region ahead of the whole scale region. The V4.1 records (528B MXFP8,
+    # 288B NVFP4) are interleaved -- each token's scales follow its own values --
+    # so feeding them here silently misreads every token. They belong to
+    # vllm_sail.models.deepseek_v41.ops.cache_gather.
+    if k_cache.shape[-1] != 584:
+        raise ValueError(
+            "PPU software planar gather requires the 584-byte V4 record, got "
+            f"{k_cache.shape[-1]}; V4.1 528B/288B records are interleaved and "
+            "must use the V4.1 gather"
+        )
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
     TOKEN_SCALE_DIM = 8

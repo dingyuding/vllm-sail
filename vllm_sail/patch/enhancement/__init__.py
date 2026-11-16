@@ -24,12 +24,17 @@ from vllm_sail.patch.enhancement import deep_gemm_redirect  # noqa: F401
 from vllm_sail.patch.enhancement import fused_moe_ppu
 from vllm_sail.patch.enhancement import int8_quant  # noqa: F401
 from vllm_sail.patch.enhancement import kernel_warmup  # noqa: F401
+from vllm_sail.patch.enhancement import mega_moe
 from vllm_sail.patch.enhancement import triton_warmup
 from vllm_sail.patch.enhancement import modular_kernel  # noqa: F401
 from vllm_sail.patch.enhancement import online_quantization_dtype  # noqa: F401
 from vllm_sail.patch.enhancement import quant_keys  # noqa: F401
 from vllm_sail.patch.enhancement import tuned_config_lookup  # noqa: F401
 from vllm_sail.patch.enhancement import models  # noqa: F401
+
+# Shapes the fused attention's load-time permutation for per-channel scales;
+# must follow `models` (which imports the same upstream module).
+from vllm_sail.patch.enhancement import deepseek_v41_fused_layout  # noqa: F401
 from vllm_sail.patch.enhancement import mxfp4
 from vllm_sail.patch.enhancement import residual  # noqa: F401
 
@@ -38,6 +43,7 @@ from vllm_sail.patch.enhancement import residual  # noqa: F401
 compressed_tensors_ppu.install()
 triton_warmup.install()
 fused_moe_ppu.install()
+mega_moe.install()
 mxfp4.install()
 
 # After generic quantization adapters, before runtime calls consume tuned configs.

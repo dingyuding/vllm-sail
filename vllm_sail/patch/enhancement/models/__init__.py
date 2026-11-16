@@ -18,10 +18,23 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``deepseek_v4`` — selects the plugin FlashMLA subclass only on PPU; the
   quantization-specific weights mapper remains plugin-local so CUDA behavior
   is unchanged.
+* ``deepseek_v41_mega_mhc`` — routes the V4.1 Mega mHC kernel to the PPU
+  DeepGEMM build, which supports ZW-M890P instead of the upstream SM 10.x
+  family.
+* ``glm5_next_mtp`` — quantization support for the GLM-5.3-Flash MTP draft:
+  ``SupportsQuant`` in ``Glm5NextMTP``'s bases, a ``hf_to_vllm_mapper`` that
+  strips the checkpoint's tower prefix (``model.language_model.layers.N.`` ->
+  ``model.layers.N.``) and the ``packed_modules_mapping`` the fused
+  shared-expert projection needs, so the channelwise dense layers survive the
+  draft's layer naming. The draft's by-value ``_try_load_fp8_attn_proj`` binding
+  is rebound by ``bugfix/glm5_next_int8_mla_dequant`` through its ``_CONSUMERS``
+  list.
 * ``kimi_k3`` — quantized routed up-projection support for the latent-MoE
   tail's fused tiers.
 * ``llama4`` — torch.compile on the custom router (+1).
 * ``minimax_m3`` — retain ordinary MoE finalize on PPU before NVIDIA imports.
+* ``minimax_m3_msa`` — route MiniMax M3 indexer + sparse attend to the SAIL
+  (``msa_for_sail``) kernels on PPU, with 890P fp8 / 810E bf16 defaults.
 * ``qwen3_moe`` — per-layer mix_layer quant overrides (+36).
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
 * ``qwen4_exp_qsa`` — route Qwen4Exp QSA through PPU FA3's CUDA kernel where it
@@ -30,20 +43,26 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``moe_marlin_gate`` — VLLM_PPU_ENABLE_MOE_MARLIN default-off gate.
 """
 
+# Capture the shared Q alias for V4.1 before V4 patches it to avoid duplicate registration.
+from vllm_sail.patch.enhancement.models import deepseek_v41_int8  # noqa: F401, I001
 from vllm_sail.patch.enhancement.models import (
     deepseek_mtp,  # noqa: F401
     deepseek_v2,  # noqa: F401
     deepseek_v4,  # noqa: F401
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
+    deepseek_v4_graph_warmup,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
     deepseek_v41,  # noqa: F401
     deepseek_v41_engram,  # noqa: F401
     deepseek_v41_indexer,  # noqa: F401
+    deepseek_v41_mega_mhc,  # noqa: F401
     glm5_next,  # noqa: F401
+    glm5_next_mtp,  # noqa: F401
     kimi_k3,  # noqa: F401
     llama4,  # noqa: F401
     minimax_m3,  # noqa: F401
+    minimax_m3_msa,  # noqa: F401
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
